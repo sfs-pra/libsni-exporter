@@ -33,12 +33,27 @@ static SniExporter *make_tray(const char *item_id) {
     return t;
 }
 
+typedef struct {
+    GVariant *result;
+    GError *error;
+    gboolean done;
+} MenuCallState;
+
+static void on_menu_call_done(GObject *source_object,
+                              GAsyncResult *res,
+                              gpointer user_data) {
+    MenuCallState *state = user_data;
+    state->result = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source_object), res, &state->error);
+    state->done = TRUE;
+}
+
 static GVariant *call_menu(SniExporter *tray, const char *method, GVariant *params) {
     GError *err = NULL;
     GDBusConnection *conn = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &err);
     g_assert_no_error(err);
 
-    GVariant *result = g_dbus_connection_call_sync(
+    MenuCallState state = {0};
+    g_dbus_connection_call(
         conn,
         sni_exporter_get_bus_name(tray),
         sni_exporter_get_menu_path(tray),
@@ -49,10 +64,25 @@ static GVariant *call_menu(SniExporter *tray, const char *method, GVariant *para
         G_DBUS_CALL_FLAGS_NONE,
         3000,
         NULL,
-        &err);
-    g_assert_no_error(err);
+        on_menu_call_done,
+        &state);
+
+    while (!state.done) {
+        g_main_context_iteration(NULL, TRUE);
+    }
+
+    g_assert_no_error(state.error);
     g_object_unref(conn);
-    return result;
+    return state.result;
+}
+
+static GVariant *empty_group_properties_params(void) {
+    GVariant *children[] = {
+        g_variant_new_array(G_VARIANT_TYPE_INT32, NULL, 0),
+        g_variant_new_strv(NULL, 0),
+    };
+
+    return g_variant_new_tuple(children, 2);
 }
 
 /* ── test 1: toggle item emits toggle-type (string) and toggle-state (int32) ── */
@@ -67,7 +97,7 @@ static void test_toggle_item_properties(void) {
 
     /* GetGroupProperties with empty ids list → returns all items */
     GVariant *reply = call_menu(tray, "GetGroupProperties",
-                                 g_variant_new("(ias)", 0, NULL));
+                                 empty_group_properties_params());
     g_assert_nonnull(reply);
 
     GVariant *arr = g_variant_get_child_value(reply, 0);
@@ -118,7 +148,7 @@ static void test_action_item_no_toggle(void) {
     drain();
 
     GVariant *reply = call_menu(tray, "GetGroupProperties",
-                                 g_variant_new("(ias)", 0, NULL));
+                                 empty_group_properties_params());
     g_assert_nonnull(reply);
 
     GVariant *arr = g_variant_get_child_value(reply, 0);
